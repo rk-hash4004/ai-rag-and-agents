@@ -1,0 +1,51 @@
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd   http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd   http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+  <!-- v2 of /agent/loop (new file, v1 left untouched). Same loop, dispatch and tools; only the tool descriptions and system prompt change,
+       so a question like "can I still cancel it?" goes to search_policy instead of triggering cancel_order. -->
+  <flow name="tool-calling-agent-v2-flow">
+    <http:listener allowedMethods="POST" config-ref="HTTP_Listener_config" doc:name="Listener" path="/agent/loop2"></http:listener>
+    <set-variable doc:name="User question" value="#[payload.question]" variableName="userQuestion"></set-variable>
+    <set-variable doc:name="Max iterations" value="#[payload.maxIterations default 5]" variableName="maxIterations"></set-variable>
+    <set-variable doc:name="Iteration" value="#[0]" variableName="iteration"></set-variable>
+    <set-variable doc:name="Tools used" value="#[[]]" variableName="toolsUsed"></set-variable>
+    <ee:transform doc:name="Build tools and first messages">
+      <ee:variables>
+        <ee:set-variable variableName="tools"><![CDATA[%dw 2.0
+output application/json
+fun tool(name, desc, props, req) = {
+  "type": "function",
+  "function": { name: name, description: desc, parameters: { "type": "object", properties: props, required: req } }
+}
+---
+[
+  tool("get_order_status", "Get the current status of a customer order by its order id. Use this to check where an order is, and before any cancellation request.",
+       { orderId: { "type": "string", description: "Order id such as ORD-1042" } }, ["orderId"]),
+  tool("search_policy", "Search the company refund, shipping and cancellation policies. Use for ANY question about rules or what is allowed, including 'can I cancel', 'am I allowed to', 'what is the policy'.",
+       { question: { "type": "string", description: "The policy question in plain words" } }, ["question"]),
+  tool("cancel_order", "Simulate a cancellation request for this demo. ONLY use when the customer clearly instructs you to cancel a specific order, for example 'cancel ORD-1042'. NEVER use for questions such as 'can I cancel' or 'is it possible to cancel'; use search_policy for those. No request is saved and no order is cancelled; a real implementation requires human approval.",
+       { orderId: { "type": "string", description: "Order id such as ORD-1042" } }, ["orderId"])
+]]]></ee:set-variable>
+        <ee:set-variable variableName="messages"><![CDATA[%dw 2.0
+output application/json
+---
+[
+  { role: "system", content: "You are an order support assistant. Use tools for order data and policies. State only facts that appear in tool results; never guess or add promises. A question is not an instruction: if the customer asks whether they can or may do something, answer it with get_order_status and search_policy and do NOT call cancel_order. Call cancel_order only when the customer clearly tells you to cancel a specific order, and check its status with get_order_status first. cancel_order is a simulation: no request is saved and no order is cancelled. Explicitly tell the user this and that a real cancellation requires human approval. If a tool reports an error or degraded result, explain that limitation." },
+  { role: "user", content: vars.userQuestion }
+]]]></ee:set-variable>
+      </ee:variables>
+    </ee:transform>
+    <flow-ref name="agent-loop-flow" doc:name="Agent loop (shared with v1)"></flow-ref>
+    <ee:transform doc:name="Final response">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.userQuestion,
+  toolsUsed: vars.toolsUsed,
+  iterations: vars.iteration,
+  answer: vars.finalAnswer
+}]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+  </flow>
+</mule>

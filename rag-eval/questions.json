@@ -1,0 +1,14 @@
+[
+  {"q": "Can I cancel an order after it has shipped?", "file": "cancellation-policy.txt", "section": "3. Orders that have shipped", "type": "natural"},
+  {"q": "I already got a dispatch notification. Can I still stop my purchase?", "file": "cancellation-policy.txt", "section": "3. Orders that have shipped", "type": "paraphrase"},
+  {"q": "How long do I have to return an item?", "file": "refund-policy.txt", "section": "1. Eligibility", "type": "natural"},
+  {"q": "My parcel has not turned up, who do I talk to?", "file": "shipping-policy.txt", "section": "6. Delayed or lost shipments", "type": "paraphrase"},
+  {"q": "Can I change my delivery address after it shipped?", "file": "shipping-policy.txt", "section": "7. Address changes", "type": "natural"},
+  {"q": "How much does standard delivery cost?", "file": "shipping-policy.txt", "section": "3. Shipping costs", "type": "natural"},
+  {"q": "I cancelled my order. How long until I get my money back?", "file": "cancellation-policy.txt", "section": "6. Refund timing for cancellations", "type": "trap"},
+  {"q": "The item arrived broken. What are my options?", "file": "refund-policy.txt", "section": "6. Damaged or defective items", "type": "paraphrase"},
+  {"q": "Which products can never be returned?", "file": "refund-policy.txt", "section": "2. Non-refundable items", "type": "paraphrase"},
+  {"q": "Do you ship internationally and who pays customs?", "file": "shipping-policy.txt", "section": "4. International shipping", "type": "natural"},
+  {"q": "Do you offer price matching?", "file": null, "section": null, "type": "out-of-scope"},
+  {"q": "Do you have a loyalty rewards program?", "file": null, "section": null, "type": "out-of-scope"}
+]

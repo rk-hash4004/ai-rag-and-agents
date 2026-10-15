@@ -1,0 +1,186 @@
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd   http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd   http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+  <!-- Step 1: send the question plus a tool definition to the LLM and return its raw reply.
+       Nothing is executed yet; the LLM only asks for a call. -->
+  <flow name="tool-calling-step1-flow">
+    <http:listener allowedMethods="POST" config-ref="HTTP_Listener_config" doc:name="Listener" path="/agent/step1"></http:listener>
+    <set-variable doc:name="Set variable question" value="#[payload.question]" variableName="question"></set-variable>
+    <http:request config-ref="Groq_HTTP_config" doc:name="Ask Groq with tools" method="POST" path="/openai/v1/chat/completions">
+      <http:body><![CDATA[#[output application/json
+---
+{
+  model: "openai/gpt-oss-120b",
+  messages: [
+    { role: "system", content: "You are an order support assistant. Use a tool when you need order data. Never guess an order status." },
+    { role: "user", content: vars.question }
+  ],
+  tools: [
+    {
+      "type": "function",
+      "function": {
+        name: "get_order_status",
+        description: "Get the current status of a customer order by its order id.",
+        parameters: {
+          "type": "object",
+          properties: {
+            orderId: { "type": "string", description: "The order id, for example ORD-1042" }
+          },
+          required: ["orderId"]
+        }
+      }
+    }
+  ],
+  tool_choice: "auto",
+  stream: false
+}]]]></http:body>
+      <http:headers><![CDATA[#[{ "Content-Type": "application/json", "Authorization": "Bearer " ++ p('groq.api.key') }]]]></http:headers>
+    </http:request>
+    <ee:transform doc:name="Show finish_reason and tool_calls">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  finishReason: payload.choices[0].finish_reason,
+  toolCalls: payload.choices[0].message.tool_calls default [],
+  content: payload.choices[0].message.content
+}]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+  </flow>
+
+  <!-- Step 2: full round trip. LLM asks -> Mule runs the tool flow -> LLM writes the final answer. -->
+  <flow name="tool-calling-step2-flow">
+    <http:listener allowedMethods="POST" config-ref="HTTP_Listener_config" doc:name="Listener" path="/agent/ask"></http:listener>
+    <set-variable doc:name="Set variable question" value="#[payload.question]" variableName="question"></set-variable>
+    <ee:transform doc:name="Build tools and first messages">
+      <ee:variables>
+        <ee:set-variable variableName="tools"><![CDATA[%dw 2.0
+output application/json
+---
+[
+  {
+    "type": "function",
+    "function": {
+      name: "get_order_status",
+      description: "Get the current status of a customer order by its order id.",
+      parameters: {
+        "type": "object",
+        properties: {
+          orderId: { "type": "string", description: "The order id, for example ORD-1042" }
+        },
+        required: ["orderId"]
+      }
+    }
+  }
+]]]></ee:set-variable>
+        <ee:set-variable variableName="messages"><![CDATA[%dw 2.0
+output application/json
+---
+[
+  { role: "system", content: "You are an order support assistant. Use a tool when you need order data. Never guess an order status." },
+  { role: "user", content: vars.question }
+]]]></ee:set-variable>
+      </ee:variables>
+    </ee:transform>
+    <flow-ref name="groq-chat-subflow" doc:name="LLM call 1"></flow-ref>
+    <set-variable doc:name="Save finish reason" value="#[payload.choices[0].finish_reason]" variableName="finishReason"></set-variable>
+    <choice doc:name="Tool requested?">
+      <when expression="#[vars.finishReason == 'tool_calls']">
+        <ee:transform doc:name="Pick the first tool call">
+          <ee:variables>
+            <ee:set-variable variableName="assistantMsg"><![CDATA[%dw 2.0
+output application/json
+var m = payload.choices[0].message
+---
+{ role: "assistant", content: m.content, tool_calls: m.tool_calls }]]></ee:set-variable>
+            <ee:set-variable variableName="toolCall"><![CDATA[%dw 2.0
+output application/json
+---
+payload.choices[0].message.tool_calls[0]]]></ee:set-variable>
+          </ee:variables>
+        </ee:transform>
+        <choice doc:name="Which tool?">
+          <when expression="#[vars.toolCall.function.name == 'get_order_status']">
+            <set-payload doc:name="Parse arguments (JSON string to object)" value="#[read(vars.toolCall.function.arguments, 'application/json')]"></set-payload>
+            <flow-ref name="get-order-status-flow" doc:name="Run tool: get_order_status"></flow-ref>
+          </when>
+          <otherwise>
+            <set-payload doc:name="Unknown tool" value="#[{ error: 'Unknown tool: ' ++ vars.toolCall.function.name }]"></set-payload>
+          </otherwise>
+        </choice>
+        <ee:transform doc:name="Append tool result to messages">
+          <ee:variables>
+            <ee:set-variable variableName="messages"><![CDATA[%dw 2.0
+output application/json
+---
+vars.messages ++ [
+  vars.assistantMsg,
+  { role: "tool", tool_call_id: vars.toolCall.id, content: write(payload, "application/json") }
+]]]></ee:set-variable>
+          </ee:variables>
+        </ee:transform>
+        <flow-ref name="groq-chat-subflow" doc:name="LLM call 2"></flow-ref>
+        <ee:transform doc:name="Final answer after tool">
+          <ee:message>
+            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  toolUsed: vars.toolCall.function.name,
+  toolArguments: read(vars.toolCall.function.arguments, "application/json"),
+  answer: payload.choices[0].message.content
+}]]></ee:set-payload>
+          </ee:message>
+        </ee:transform>
+      </when>
+      <otherwise>
+        <ee:transform doc:name="Answer without a tool">
+          <ee:message>
+            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  toolUsed: null,
+  answer: payload.choices[0].message.content
+}]]></ee:set-payload>
+          </ee:message>
+        </ee:transform>
+      </otherwise>
+    </choice>
+  </flow>
+
+  <!-- Reusable LLM call: reads vars.messages and vars.tools, returns Groq's raw response -->
+  <sub-flow name="groq-chat-subflow">
+    <http:request config-ref="Groq_HTTP_config" doc:name="Groq chat completions" method="POST" path="/openai/v1/chat/completions">
+      <http:body><![CDATA[#[output application/json
+---
+{
+  model: "openai/gpt-oss-120b",
+  messages: vars.messages,
+  tools: vars.tools,
+  tool_choice: "auto",
+  stream: false
+}]]]></http:body>
+      <http:headers><![CDATA[#[{ "Content-Type": "application/json", "Authorization": "Bearer " ++ p('groq.api.key') }]]]></http:headers>
+    </http:request>
+  </sub-flow>
+
+  <!-- The actual tool: a stub that returns hard-coded orders -->
+  <flow name="get-order-status-flow">
+    <ee:transform doc:name="Look up order (stub)">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var orders = {
+  "ORD-1042": { status: "PROCESSING", items: 3, shipped: false },
+  "ORD-1043": { status: "SHIPPED", items: 1, shipped: true, carrier: "BlueDart" }
+}
+---
+{ orderId: payload.orderId } ++ (orders[payload.orderId] default { status: "NOT_FOUND" })]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+  </flow>
+</mule>

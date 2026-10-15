@@ -1,0 +1,275 @@
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd   http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd   http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd   http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+  <!-- Ollama: local embedding model all-minilm (384 dimensions) -->
+  <http:request-config doc:name="HTTP Request configuration (Ollama)" name="Ollama_HTTP_config" responseTimeout="60000">
+    <http:request-connection host="localhost" port="11434" protocol="HTTP"></http:request-connection>
+  </http:request-config>
+  <!-- Groq: cloud generation, llama-3.3-70b-versatile, OpenAI-compatible chat completions endpoint -->
+  <http:request-config doc:name="HTTP Request configuration (Groq)" name="Groq_HTTP_config" responseTimeout="60000">
+    <http:request-connection host="api.groq.com" port="443" protocol="HTTPS"></http:request-connection>
+  </http:request-config>
+  <!-- pgvector container rag-pgvector: db ragdb, user rag, port 5433 (local demo credentials only) -->
+  <db:config doc:name="Database Config (pgvector)" name="PgVector_Database_Config">
+    <db:generic-connection driverClassName="org.postgresql.Driver" password="${secure::db.password}" url="jdbc:postgresql://localhost:5433/ragdb" user="rag"></db:generic-connection>
+  </db:config>
+  <flow name="rag-pgvector-ingest-flow">
+    <http:listener allowedMethods="POST" config-ref="HTTP_Listener_config" doc:name="Listener" path="/rag/pgvector/ingest"></http:listener>
+    <set-variable doc:name="Chunk size" value="#[payload.chunkSize default 300]" variableName="chunkSize"></set-variable>
+    <set-variable doc:name="Chunk overlap" value="#[payload.overlap default 50]" variableName="overlap"></set-variable>
+    <set-variable doc:name="Documents and metadata" value='#[[
+  {file: "refund-policy.txt", domain: "order-management", documentType: "policy", version: "2026"},
+  {file: "shipping-policy.txt", domain: "order-management", documentType: "policy", version: "2026"},
+  {file: "cancellation-policy.txt", domain: "order-management", documentType: "policy", version: "2026"}
+]]' variableName="docs"></set-variable>
+    <db:delete config-ref="PgVector_Database_Config" doc:name="Clear old chunks (re-index)">
+      <db:sql><![CDATA[DELETE FROM rag_chunks]]></db:sql>
+    </db:delete>
+    <foreach collection="#[vars.docs]" doc:name="For each document">
+      <set-variable doc:name="Current document" value="#[payload]" variableName="currentDoc"></set-variable>
+      <set-variable doc:name="Read file text" value="#[readUrl(&quot;classpath://documents/&quot; ++ vars.currentDoc.file, &quot;text/plain&quot;)]" variableName="text"></set-variable>
+      <ee:transform doc:name="Chunk text (size + overlap)">
+        <ee:message>
+          <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var size = vars.chunkSize as Number
+var step = size - (vars.overlap as Number)
+var text = vars.text as String
+var n = if (sizeOf(text) <= size) 1 else ceil((sizeOf(text) - size) / step) + 1
+// Snap raw character-count chunk boundaries out to the nearest whitespace,
+// so a chunk never starts or ends mid-word (e.g. "an no longer be cancelled"
+// instead of "...order can no longer be cancelled") - verified live that a
+// mid-word-truncated chunk confused the downstream LLM into wrong/refused
+// answers even though the full sentence was present one word earlier.
+fun snapStart(pos: Number): Number =
+  if (pos <= 0) 0
+  else if ((text[(pos - 1) to (pos - 1)]) matches /\s/) pos
+  else snapStart(pos - 1)
+fun snapEnd(pos: Number): Number =
+  if (pos >= sizeOf(text)) sizeOf(text)
+  else if ((text[pos to pos]) matches /\s/) pos
+  else snapEnd(pos + 1)
+---
+(0 to n - 1) map ((i) -> do {
+  var rawStart = i * step
+  var rawEnd = min([i * step + size, sizeOf(text)])
+  var s = if (rawStart <= 0) 0 else snapStart(rawStart)
+  var e = if (rawEnd >= sizeOf(text)) sizeOf(text) else snapEnd(rawEnd)
+  ---
+  trim(text[s to e - 1])
+})]]></ee:set-payload>
+        </ee:message>
+      </ee:transform>
+      <set-variable doc:name="Save chunks" value="#[payload]" variableName="chunks"></set-variable>
+      <http:request config-ref="Ollama_HTTP_config" doc:name="Embed chunks with Ollama" method="POST" path="/api/embed">
+        <http:body><![CDATA[#[output application/json
+---
+{
+  model: "all-minilm",
+  "input": vars.chunks
+}]]]></http:body>
+        <http:headers><![CDATA[#[{ "Content-Type": "application/json" }]]]></http:headers>
+      </http:request>
+      <ee:transform doc:name="Build rows for pgvector">
+        <ee:message>
+          <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+(payload.embeddings zip vars.chunks) map ((pair, idx) -> {
+  source_file: vars.currentDoc.file,
+  domain: vars.currentDoc.domain,
+  document_type: vars.currentDoc.documentType,
+  version: vars.currentDoc.version,
+  chunk_index: idx,
+  chunk_text: pair[1],
+  embedding: "[" ++ (pair[0] joinBy ",") ++ "]"
+})]]></ee:set-payload>
+        </ee:message>
+      </ee:transform>
+      <db:bulk-insert config-ref="PgVector_Database_Config" doc:name="Insert chunks + vectors">
+        <db:bulk-input-parameters><![CDATA[#[payload]]]></db:bulk-input-parameters>
+        <db:sql><![CDATA[INSERT INTO rag_chunks (source_file, domain, document_type, version, chunk_index, chunk_text, embedding)
+VALUES (:source_file, :domain, :document_type, :version, :chunk_index, :chunk_text, CAST(:embedding AS vector))]]></db:sql>
+      </db:bulk-insert>
+    </foreach>
+    <db:select config-ref="PgVector_Database_Config" doc:name="Count stored chunks">
+      <db:sql><![CDATA[SELECT source_file, count(*) AS chunks FROM rag_chunks GROUP BY source_file ORDER BY source_file]]></db:sql>
+    </db:select>
+    <ee:transform doc:name="Ingest summary">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  chunkSize: vars.chunkSize,
+  overlap: vars.overlap,
+  totalChunks: sum(payload.chunks map ($ as Number)),
+  perFile: payload
+}]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+  </flow>
+  <flow name="rag-pgvector-query-flow">
+    <http:listener allowedMethods="POST" config-ref="HTTP_Listener_config" doc:name="Listener" path="/rag/pgvector/ask"></http:listener>
+    <set-variable doc:name="Set variable question" value="#[payload.question]" variableName="question"></set-variable>
+    <set-variable doc:name="Top K" value="#[payload.topK default 3]" variableName="topK"></set-variable>
+    <set-variable doc:name="Filter: domain" value="#[payload.domain default null]" variableName="filterDomain"></set-variable>
+    <set-variable doc:name="Filter: document type" value="#[payload.documentType default null]" variableName="filterDocType"></set-variable>
+    <set-variable doc:name="Filter: version" value="#[payload.version default null]" variableName="filterVersion"></set-variable>
+    <set-variable doc:name="Min score" value="#[payload.minScore default 0.3]" variableName="minScore"></set-variable>
+    <http:request config-ref="Ollama_HTTP_config" doc:name="Embed question with Ollama" method="POST" path="/api/embed">
+      <http:body><![CDATA[#[output application/json
+---
+{
+  model: "all-minilm",
+  "input": [ vars.question ]
+}]]]></http:body>
+      <http:headers><![CDATA[#[{ "Content-Type": "application/json" }]]]></http:headers>
+    </http:request>
+    <set-variable doc:name="Question vector" value="#[&quot;[&quot; ++ (payload.embeddings[0] joinBy &quot;,&quot;) ++ &quot;]&quot;]" variableName="qvec"></set-variable>
+    <try doc:name="Try vector search + answer">
+      <db:select config-ref="PgVector_Database_Config" doc:name="Similarity search">
+        <db:sql><![CDATA[SELECT source_file, domain, document_type, version, chunk_index, chunk_text,
+  1 - (embedding <=> CAST(:qvec AS vector)) AS score
+FROM rag_chunks
+WHERE (CAST(:domain AS varchar) IS NULL OR domain = CAST(:domain AS varchar))
+  AND (CAST(:documentType AS varchar) IS NULL OR document_type = CAST(:documentType AS varchar))
+  AND (CAST(:version AS varchar) IS NULL OR version = CAST(:version AS varchar))
+ORDER BY embedding <=> CAST(:qvec AS vector)
+LIMIT :topK]]></db:sql>
+        <db:input-parameters><![CDATA[#[{ qvec: vars.qvec, topK: vars.topK, domain: vars.filterDomain, documentType: vars.filterDocType, version: vars.filterVersion }]]]></db:input-parameters>
+      </db:select>
+      <ee:transform doc:name="Build retrieved chunks">
+        <ee:message>
+          <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+payload map ((row) -> {
+  source: row.source_file,
+  domain: row.domain,
+  documentType: row.document_type,
+  version: row.version,
+  chunkIndex: row.chunk_index,
+  score: row.score,
+  text: row.chunk_text
+})]]></ee:set-payload>
+        </ee:message>
+      </ee:transform>
+      <set-variable doc:name="Save retrieved chunks" value="#[payload]" variableName="retrievedChunks"></set-variable>
+      <set-variable doc:name="Top score" value="#[(vars.retrievedChunks[0].score) default 0]" variableName="topScore"></set-variable>
+      <choice doc:name="Clears minScore?">
+        <when expression="#[vars.topScore >= vars.minScore]">
+          <try doc:name="Try Groq cloud answer">
+            <http:request config-ref="Groq_HTTP_config" doc:name="Generate answer with Groq" method="POST" path="/openai/v1/chat/completions">
+              <http:body><![CDATA[#[output application/json
+---
+{
+  model: "openai/gpt-oss-120b",
+  messages: [
+    {
+      role: "system",
+      content: "Answer the question using ONLY the provided context. Always explain your reasoning in full sentences using the context - never answer with just yes or no. If the context does not contain the answer, say exactly: I do not know."
+    },
+    {
+      role: "user",
+      content: "Context:\n" ++ (vars.retrievedChunks map $.text joinBy "\n\n") ++ "\n\nQuestion: " ++ vars.question
+    }
+  ],
+  stream: false
+}]]]></http:body>
+              <http:headers><![CDATA[#[{ "Content-Type": "application/json", "Authorization": "Bearer " ++ p('groq.api.key') }]]]></http:headers>
+            </http:request>
+            <ee:transform doc:name="Grounded answer">
+              <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  topK: vars.topK,
+  filters: { domain: vars.filterDomain, documentType: vars.filterDocType, version: vars.filterVersion },
+  minScore: vars.minScore,
+  topScore: vars.topScore,
+  grounded: true,
+  answer: payload.choices[0].message.content,
+  source: vars.retrievedChunks[0].source,
+  retrievedChunks: vars.retrievedChunks
+}]]></ee:set-payload>
+              </ee:message>
+            </ee:transform>
+            <error-handler>
+              <on-error-continue doc:name="Groq unreachable: degrade gracefully" enableNotifications="true" logException="true" type="HTTP:CONNECTIVITY, HTTP:TIMEOUT, HTTP:UNAUTHORIZED, HTTP:FORBIDDEN, HTTP:TOO_MANY_REQUESTS, HTTP:SERVICE_UNAVAILABLE">
+                <ee:transform doc:name="Degraded response">
+                  <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  topK: vars.topK,
+  filters: { domain: vars.filterDomain, documentType: vars.filterDocType, version: vars.filterVersion },
+  minScore: vars.minScore,
+  topScore: vars.topScore,
+  grounded: false,
+  degraded: true,
+  answer: null,
+  reason: "AI service unavailable or rate-limited",
+  message: "Groq is unavailable or rate-limited right now. Showing the most relevant policy section instead.",
+  excerpt: vars.retrievedChunks[0].text,
+  source: vars.retrievedChunks[0].source,
+  retrievedChunks: vars.retrievedChunks
+}]]></ee:set-payload>
+                  </ee:message>
+                </ee:transform>
+              </on-error-continue>
+            </error-handler>
+          </try>
+        </when>
+        <otherwise>
+          <ee:transform doc:name="Below minScore: no answer attempted">
+            <ee:message>
+              <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  topK: vars.topK,
+  filters: { domain: vars.filterDomain, documentType: vars.filterDocType, version: vars.filterVersion },
+  minScore: vars.minScore,
+  topScore: vars.topScore,
+  grounded: false,
+  answer: null,
+  reason: "Below minScore - no chunk relevant enough to attempt an answer",
+  source: null,
+  retrievedChunks: vars.retrievedChunks
+}]]></ee:set-payload>
+            </ee:message>
+          </ee:transform>
+        </otherwise>
+      </choice>
+      <error-handler>
+        <on-error-continue doc:name="Vector DB unreachable: fail closed" enableNotifications="true" logException="true" type="DB:CONNECTIVITY, DB:QUERY_EXECUTION">
+          <ee:transform doc:name="Vector DB down response">
+            <ee:message>
+              <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  topK: vars.topK,
+  filters: { domain: vars.filterDomain, documentType: vars.filterDocType, version: vars.filterVersion },
+  minScore: vars.minScore,
+  topScore: null,
+  grounded: false,
+  degraded: true,
+  answer: null,
+  reason: "Vector database unavailable",
+  message: "The retrieval database is unreachable right now. Please try again shortly.",
+  source: null,
+  retrievedChunks: []
+}]]></ee:set-payload>
+            </ee:message>
+          </ee:transform>
+        </on-error-continue>
+      </error-handler>
+    </try>
+  </flow>
+</mule>

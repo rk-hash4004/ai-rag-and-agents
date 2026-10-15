@@ -1,0 +1,13 @@
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ms-aichain="http://www.mulesoft.org/schema/mule/ms-aichain" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:ms-vectors="http://www.mulesoft.org/schema/mule/ms-vectors" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd  http://www.mulesoft.org/schema/mule/ms-aichain http://www.mulesoft.org/schema/mule/ms-aichain/current/mule-ms-aichain.xsd
+	http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+	http://www.mulesoft.org/schema/mule/ms-vectors http://www.mulesoft.org/schema/mule/ms-vectors/current/mule-ms-vectors.xsd">
+  <ms-aichain:config configType="Configuration Json" filePath='#[mule.home ++ "/apps/" ++ app.name ++ "/gemini-config.json"]' llmType="GEMINI_AI" modelName="gemini-3.7-flash" name="LLM_Config"></ms-aichain:config>
+  <flow name="rag-refund-policy">
+    <http:listener doc:name="Listener" doc:id="hpdfrk" path="/rag-refund" config-ref="HTTP_Listener_config"/>
+    <ms-aichain:rag-load-document contextPath="#[mule.home ++ '/apps/' ++ app.name ++ '/documents/refund-policy.txt']" doc:id="ktxxmf" doc:name="Rag load document" config-ref="LLM_Config">
+      <ms-aichain:data><![CDATA[#[payload.question]]]></ms-aichain:data>
+    </ms-aichain:rag-load-document>
+  </flow>
+</mule>

@@ -1,0 +1,4 @@
+# Copy to secure.yaml (git-ignored). Encrypt the value with the MuleSoft Secure Properties Tool
+# using algorithm AES, mode CBC, and your own key (passed at runtime as -M-Dsecure.key=...).
+db:
+  password: "![REPLACE_WITH_ENCRYPTED_DB_PASSWORD]"

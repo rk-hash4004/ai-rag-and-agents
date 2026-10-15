@@ -1,0 +1,19 @@
+CANCELLATION POLICY
+
+1. Cancellation window
+Orders can be cancelled free of charge within 1 hour of being placed, as long as the order has not yet entered "Processing" status.
+
+2. After processing begins
+Once an order enters "Processing" status, it can no longer be cancelled through self-service. Customers must contact support@example.com, and cancellation is granted only if the order has not yet shipped.
+
+3. Orders that have shipped
+Orders that have already shipped cannot be cancelled. Customers should instead follow the standard Refund Policy return process once the item is received.
+
+4. Subscription cancellations
+Recurring subscription orders can be cancelled at any time from the account dashboard. Cancellation takes effect at the end of the current billing cycle; no partial-period refunds are issued for subscriptions.
+
+5. Cancellation by the company
+We reserve the right to cancel an order due to product unavailability, pricing errors, or suspected fraudulent activity. In such cases, a full refund is issued automatically to the original payment method within 5 business days.
+
+6. Refund timing for cancellations
+Refunds for successfully cancelled orders are processed within 3-5 business days and follow the same refund method described in the Refund Policy.

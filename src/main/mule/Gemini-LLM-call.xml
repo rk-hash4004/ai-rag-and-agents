@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+	http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+	<flow name="gemini-ai-test-flow">
+		<http:listener doc:name="Listener" doc:id="ge000001" path="/ai-test" config-ref="HTTP_Listener_config" allowedMethods="POST"/>
+
+		<set-variable variableName="userPrompt" value="#[payload.prompt]" doc:name="Save Prompt Before Overwrite" doc:id="ge000004"/>
+
+		<try doc:name="Try Call Gemini" doc:id="ge000005">
+		<http:request doc:name="Call Gemini API" doc:id="ge000002" method="POST" config-ref="Gemini_HTTP_Request_config" path="/v1beta/models/gemini-3.7-flash:generateContent" responseTimeout="60000">
+			<http:body><![CDATA[#[%dw 2.0
+output application/json
+---
+{
+    systemInstruction: {
+        parts: [
+            {
+                text: "You are a terse MuleSoft integration expert. Answer in plain, simple sentences."
+            }
+        ]
+    },
+    contents: [
+        {
+            role: "user",
+            parts: [
+                {
+                    text: vars.userPrompt
+                }
+            ]
+        }
+    ],
+    generationConfig: {
+        temperature: 0.2,
+        topP: 0.9,
+        topK: 40,
+        maxOutputTokens: 1024,
+        thinkingConfig: {
+            thinkingBudget: 0
+        },
+        responseMimeType: "application/json",
+        responseSchema: {
+            "type": "object",
+            properties: {
+                summary: { "type": "string" },
+                keyPoints: {
+                    "type": "array",
+                    items: { "type": "string" }
+                }
+            },
+            required: ["summary", "keyPoints"]
+        }
+    }
+}]]]></http:body>
+			<http:headers><![CDATA[#[{
+    "Content-Type": "application/json"
+}]]]></http:headers>
+			<http:query-params><![CDATA[#[{
+    key: p('gemini.api.key')
+}]]]></http:query-params>
+		</http:request>
+
+		<set-payload doc:name="Extract Gemini Response" doc:id="ge000003" value="#[%dw 2.0
+output application/json
+---
+read(payload.candidates[0].content.parts[0].text, &quot;application/json&quot;)]"/>
+
+		<error-handler>
+			<on-error-continue enableNotifications="true" logException="true" doc:name="Show Gemini Error" doc:id="ge000006">
+				<set-payload doc:name="Extract Error Body" doc:id="ge000007" value="#[%dw 2.0
+output application/json
+---
+{
+    errorType: error.errorType.identifier as String,
+    statusCode: error.errorMessage.attributes.statusCode default null,
+    geminiError: error.errorMessage.payload default error.description
+}]"/>
+			</on-error-continue>
+		</error-handler>
+	</try>
+	</flow>
+</mule>

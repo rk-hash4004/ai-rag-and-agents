@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:ms-aichain="http://www.mulesoft.org/schema/mule/ms-aichain"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+		http://www.mulesoft.org/schema/mule/ms-aichain http://www.mulesoft.org/schema/mule/ms-aichain/current/mule-ms-aichain.xsd">
+
+	<flow name="rag-ingest-flow">
+		<http:listener doc:name="Listener" config-ref="HTTP_Listener_config" path="/rag/ingest" allowedMethods="POST"/>
+    <ms-aichain:embedding-new-store doc:name="Embedding new store" doc:id="vkcfdv" storeName="/tmp/policy-embedding-store.json"/>
+    <ms-aichain:embedding-add-folder-to-store doc:name="Embedding add folder to store" doc:id="gurtwn" storeName="/tmp/policy-embedding-store.json" contextPath="#[mule.home ++ '/apps/' ++ app.name ++ '/documents']" maxSegmentSizeInChars="300" maxOverlapSizeInChars="50"/>
+	</flow>
+
+	<flow name="rag-ask-flow">
+		<http:listener doc:name="Listener" config-ref="HTTP_Listener_config" path="/rag/ask" allowedMethods="POST"/>
+        <set-variable doc:name="Set variable" doc:id="iyvwma" variableName="question" value="#[payload.question]"/>
+        <ms-aichain:embedding-query-from-store doc:name="Embedding query from store" doc:id="rpewcv" storeName="/tmp/policy-embedding-store.json" maxResults="3" minScore="0.3" getLatest="true">
+            <ms-aichain:question><![CDATA[#[payload.question]]]></ms-aichain:question>
+        </ms-aichain:embedding-query-from-store>
+        <set-variable doc:name="Set variable sources" doc:id="nuyrve" variableName="sources" value="#[payload.sources]"/>
+        <set-variable doc:name="Set variable context" doc:id="rstfel" variableName="context" value='#[payload.sources map $.textSegment joinBy "\n\n"]'/>
+		<try doc:name="Try AI answer">
+        <ms-aichain:chat-answer-prompt doc:name="Chat answer prompt" doc:id="zlegih" config-ref="LLM_Config">
+            <ms-aichain:prompt><![CDATA[#["Answer ONLY from the context below. If the answer is not in the context, say you do not know. Do not invent policy details.\n\nContext:\n" ++ vars.context ++ "\n\nQuestion: " ++ vars.question
+]]]></ms-aichain:prompt>
+        </ms-aichain:chat-answer-prompt>
+		<ee:transform doc:name="Build answer with sources">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var grounded = not (lower(payload.response as String) contains "i do not know")
+---
+{
+  question: vars.question,
+  answer: payload.response,
+  grounded: grounded,
+  source: if (grounded) vars.sources[0].fileName else null,
+  retrievedChunks: vars.sources map {
+    source: $.fileName,
+    score: $.individualScore,
+    text: $.textSegment
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+			<error-handler>
+				<on-error-continue enableNotifications="true" logException="true" doc:name="AI call failed: degrade gracefully" type="MS-AICHAIN:AI_SERVICES_FAILURE">
+					<ee:transform doc:name="Degraded response">
+						<ee:message>
+							<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var desc = (error.description default "") as String
+---
+{
+  question: vars.question,
+  answer: null,
+  degraded: true,
+  reason: if ((desc contains "429") or (desc contains "RESOURCE_EXHAUSTED")) "AI quota exceeded"
+          else if ((desc contains "503") or (desc contains "UNAVAILABLE")) "AI service busy"
+          else if ((desc contains "403") or (desc contains "401")) "AI access denied"
+          else "AI service error",
+  message: "The AI service is unavailable right now. Showing the most relevant policy sections instead.",
+  excerpt: vars.sources[0].textSegment,
+  source: vars.sources[0].fileName,
+  retrievedChunks: vars.sources map {
+    source: $.fileName,
+    score: $.individualScore,
+    text: $.textSegment
+  }
+}]]></ee:set-payload>
+						</ee:message>
+					</ee:transform>
+				</on-error-continue>
+			</error-handler>
+		</try>
+	</flow>
+
+	<flow name="rag-search-only-flow">
+		<http:listener doc:name="Listener" config-ref="HTTP_Listener_config" path="/rag/search" allowedMethods="POST"/>
+		<set-variable doc:name="Set variable question" variableName="question" value="#[payload.question]"/>
+		<ms-aichain:embedding-query-from-store doc:name="Embedding query from store" storeName="/tmp/policy-embedding-store.json" maxResults="#[if (payload.maxResults != null) payload.maxResults else 3]" minScore="0.3" getLatest="true">
+			<ms-aichain:question><![CDATA[#[payload.question]]]></ms-aichain:question>
+		</ms-aichain:embedding-query-from-store>
+		<ee:transform doc:name="Search result only">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.question,
+  retrievedChunks: payload.sources map {
+    source: $.fileName,
+    score: $.individualScore,
+    text: $.textSegment
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+</mule>

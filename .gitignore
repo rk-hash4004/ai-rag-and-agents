@@ -1,0 +1,78 @@
+# ------------------------------------------------------------------------------ #
+# Java defaults (https://github.com/github/gitignore/blob/master/Java.gitignore) #
+# ------------------------------------------------------------------------------ #
+*.class
+
+# Package Files #
+*.jar
+*.war
+*.ear
+
+# ------------------------------------------------------------------------------------------- #
+# Eclipse-specific (https://github.com/github/gitignore/blob/master/Global/Eclipse.gitignore) #
+# ------------------------------------------------------------------------------------------- #
+*.pydevproject
+.metadata
+bin/**
+tmp/**
+tmp/**/*
+*.tmp
+*.bak
+*.swp
+*~.nib
+local.properties
+.settings/
+.loadpath
+.project
+.classpath
+
+# External tool builders
+.externalToolBuilders/
+
+# Locally stored "Eclipse launch configurations"
+*.launch
+
+# CDT-specific
+.cproject
+
+# PDT-specific
+.buildpath
+
+# --------------- #
+# Studio-specific #
+# --------------- #
+target/
+.mule/
+.DS_Store
+velocity.log
+
+# ------------------------------------------------------------------------------ #
+# ACB defaults #
+# ------------------------------------------------------------------------------ #
+.tooling-project
+
+# -------------------------- #
+# Secrets - real config files #
+# -------------------------- #
+src/main/resources/config.yaml
+src/main/resources/gemini-config.json
+src/main/resources/secure.yaml
+src/main/resources/tls/*.p12
+src/main/resources/tls/*.jks
+
+# ------------------------------------------------------------------ #
+# ACB DataWeave-Playground scratch files (auto-generated test input  #
+# stubs when testing an inline %dw expression in the ACB UI - not    #
+# real project data)                                                 #
+# ------------------------------------------------------------------ #
+src/test/resources/embedded-dw_*/
+# ---- Added for the public copy ----
+.vscode/
+.idea/
+*.iml
+*.p12
+*.key
+*.pem
+secure*.yaml
+!secure-example.yaml
+src/test/resources/embedded-dw_*/

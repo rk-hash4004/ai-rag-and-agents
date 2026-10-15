@@ -1,0 +1,7 @@
+# Copy to config.yaml (git-ignored) and fill in your own keys.
+gemini:
+  api:
+    key: "REPLACE_WITH_YOUR_GEMINI_API_KEY"
+groq:
+  api:
+    key: "REPLACE_WITH_YOUR_GROQ_API_KEY"

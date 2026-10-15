@@ -1,0 +1,15 @@
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:tls="http://www.mulesoft.org/schema/mule/tls" xmlns:secure-properties="http://www.mulesoft.org/schema/mule/secure-properties" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="         http://www.mulesoft.org/schema/mule/core         http://www.mulesoft.org/schema/mule/core/current/mule.xsd         http://www.mulesoft.org/schema/mule/http         http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd         http://www.mulesoft.org/schema/mule/tls         http://www.mulesoft.org/schema/mule/tls/current/mule-tls.xsd         http://www.mulesoft.org/schema/mule/secure-properties         http://www.mulesoft.org/schema/mule/secure-properties/current/mule-secure-properties.xsd">
+    <configuration-properties doc:name="Configuration Properties" file="config.yaml"></configuration-properties>
+    <!-- secure.key is supplied at runtime (e.g. -M-Dsecure.key=...), never committed. It must be the key used to encrypt secure.yaml. -->
+    <secure-properties:config name="Secure_Properties_Config" doc:name="Secure Properties Config" file="secure.yaml" key="${secure.key}"/>
+    <http:listener-config name="HTTP_Listener_config">
+        <http:listener-connection host="0.0.0.0" port="8081" protocol="HTTPS">
+            <tls:context enabledProtocols="TLSv1.2">
+                <tls:key-store alias="mule-server" keyPassword="changeit" password="changeit" path="tls/server-keystore.p12" type="PKCS12"></tls:key-store>
+            </tls:context>
+        </http:listener-connection>
+    </http:listener-config>
+    <http:request-config name="Gemini_HTTP_Request_config">
+        <http:request-connection host="generativelanguage.googleapis.com" port="443" protocol="HTTPS"></http:request-connection>
+    </http:request-config>
+</mule>

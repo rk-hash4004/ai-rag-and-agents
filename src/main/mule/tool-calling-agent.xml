@@ -1,0 +1,142 @@
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd   http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd   http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+  <!-- Step 3-4 (new file, step 2 left untouched in tool-calling.xml; reuses groq-chat-subflow and get-order-status-flow from there): full agent loop. LLM asks -> Mule runs tools (validated, errors returned as results) -> LLM answers; capped at maxIterations. -->
+  <flow name="tool-calling-agent-flow">
+    <http:listener allowedMethods="POST" config-ref="HTTP_Listener_config" doc:name="Listener" path="/agent/loop"></http:listener>
+    <set-variable doc:name="User question" value="#[payload.question]" variableName="userQuestion"></set-variable>
+    <set-variable doc:name="Max iterations" value="#[5]" variableName="maxIterations"></set-variable>
+    <set-variable doc:name="Iteration" value="#[0]" variableName="iteration"></set-variable>
+    <set-variable doc:name="Tools used" value="#[[]]" variableName="toolsUsed"></set-variable>
+    <ee:transform doc:name="Build tools and first messages">
+      <ee:variables>
+        <ee:set-variable variableName="tools"><![CDATA[%dw 2.0
+output application/json
+fun tool(name, desc, props, req) = {
+  "type": "function",
+  "function": { name: name, description: desc, parameters: { "type": "object", properties: props, required: req } }
+}
+---
+[
+  tool("get_order_status", "Get the current status of a customer order by its order id.",
+       { orderId: { "type": "string", description: "Order id such as ORD-1042" } }, ["orderId"]),
+  tool("search_policy", "Search the company refund, shipping and cancellation policies. Use for any policy or rules question.",
+       { question: { "type": "string", description: "The policy question in plain words" } }, ["question"]),
+  tool("cancel_order", "Simulate a cancellation request for this demo. No request is saved and no order is cancelled; a real implementation requires human approval.",
+       { orderId: { "type": "string", description: "Order id such as ORD-1042" } }, ["orderId"])
+]]]></ee:set-variable>
+        <ee:set-variable variableName="messages"><![CDATA[%dw 2.0
+output application/json
+---
+[
+  { role: "system", content: "You are an order support assistant. Use tools for order data and policies. State only facts that appear in tool results; never guess or add promises. cancel_order is a simulation: no request is saved and no order is cancelled. Explicitly tell the user this and that a real cancellation requires human approval. If a tool reports an error or degraded result, explain that limitation." },
+  { role: "user", content: vars.userQuestion }
+]]]></ee:set-variable>
+      </ee:variables>
+    </ee:transform>
+    <flow-ref name="agent-loop-flow" doc:name="Agent loop"></flow-ref>
+    <ee:transform doc:name="Final response">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  question: vars.userQuestion,
+  toolsUsed: vars.toolsUsed,
+  iterations: vars.iteration,
+  answer: vars.finalAnswer
+}]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+  </flow>
+
+  <!-- One loop turn: call the LLM; if it asks for tools, run them all, append results, call self again (recursive flow-ref). -->
+  <flow name="agent-loop-flow">
+    <flow-ref name="groq-chat-subflow" doc:name="LLM call"></flow-ref>
+    <set-variable doc:name="Save assistant message" value="#[payload.choices[0].message]" variableName="lastMsg"></set-variable>
+    <choice doc:name="Tool calls and under cap?">
+      <when expression="#[payload.choices[0].finish_reason == 'tool_calls' and vars.iteration &lt; vars.maxIterations]">
+        <set-variable doc:name="Iteration + 1" value="#[vars.iteration + 1]" variableName="iteration"></set-variable>
+        <ee:transform doc:name="Append assistant message">
+          <ee:variables>
+            <ee:set-variable variableName="messages"><![CDATA[%dw 2.0
+output application/json
+---
+vars.messages ++ [{ role: "assistant", content: vars.lastMsg.content, tool_calls: vars.lastMsg.tool_calls }]]]></ee:set-variable>
+          </ee:variables>
+        </ee:transform>
+        <foreach collection="#[vars.lastMsg.tool_calls]" doc:name="For each tool call">
+          <set-variable doc:name="Current call" value="#[payload]" variableName="currentCall"></set-variable>
+          <flow-ref name="tool-dispatch-subflow" doc:name="Run tool"></flow-ref>
+          <ee:transform doc:name="Append tool result">
+            <ee:variables>
+              <ee:set-variable variableName="messages"><![CDATA[%dw 2.0
+output application/json
+---
+vars.messages ++ [{ role: "tool", tool_call_id: vars.currentCall.id, content: write(payload, "application/json") }]]]></ee:set-variable>
+              <ee:set-variable variableName="toolsUsed"><![CDATA[%dw 2.0
+output application/json
+---
+vars.toolsUsed ++ [vars.currentCall.function.name]]]></ee:set-variable>
+            </ee:variables>
+          </ee:transform>
+        </foreach>
+        <flow-ref name="agent-loop-flow" doc:name="Next loop turn"></flow-ref>
+      </when>
+      <when expression="#[payload.choices[0].finish_reason == 'tool_calls']">
+        <set-variable doc:name="Cap reached" value="Stopped: tool call limit reached." variableName="finalAnswer"></set-variable>
+      </when>
+      <otherwise>
+        <set-variable doc:name="Final answer" value="#[vars.lastMsg.content]" variableName="finalAnswer"></set-variable>
+      </otherwise>
+    </choice>
+  </flow>
+
+  <!-- Router + guardrails: parse args, validate, run the tool flow. Any failure becomes {error} sent back to the LLM as the tool result. -->
+  <sub-flow name="tool-dispatch-subflow">
+    <try doc:name="Try tool">
+      <set-payload doc:name="Parse arguments (JSON string to object)" value="#[read(vars.currentCall.function.arguments, 'application/json')]"></set-payload>
+      <choice doc:name="Which tool?">
+        <when expression="#[vars.currentCall.function.name == 'get_order_status']">
+          <choice doc:name="Valid orderId?">
+            <when expression="#[(payload.orderId default '') matches /ORD-\d+/]">
+              <flow-ref name="get-order-status-flow" doc:name="get_order_status"></flow-ref>
+            </when>
+            <otherwise>
+              <set-payload doc:name="Invalid orderId" value="#[{ error: 'Invalid orderId, expected ORD-1234' }]"></set-payload>
+            </otherwise>
+          </choice>
+        </when>
+        <when expression="#[vars.currentCall.function.name == 'search_policy']">
+          <set-payload doc:name="Question only" value="#[{ question: payload.question }]"></set-payload>
+          <flow-ref name="rag-pgvector-query-flow" doc:name="search_policy (RAG flow)"></flow-ref>
+          <ee:transform doc:name="Keep only what the LLM needs">
+            <ee:message>
+              <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ grounded: payload.grounded, degraded: payload.degraded default false, reason: payload.reason default null, answer: payload.answer, source: payload.source, excerpt: payload.excerpt default null }]]></ee:set-payload>
+            </ee:message>
+          </ee:transform>
+        </when>
+        <when expression="#[vars.currentCall.function.name == 'cancel_order']">
+          <choice doc:name="Valid orderId?">
+            <when expression="#[(payload.orderId default '') matches /ORD-\d+/]">
+              <set-payload doc:name="cancel_order (request only)" value="#[{ orderId: payload.orderId, status: 'SIMULATED_CANCELLATION_REQUEST', simulated: true, persisted: false, note: 'Demo only: no cancellation request was saved and no order was cancelled. A real cancellation requires human approval.' }]"></set-payload>
+            </when>
+            <otherwise>
+              <set-payload doc:name="Invalid orderId" value="#[{ error: 'Invalid orderId, expected ORD-1234' }]"></set-payload>
+            </otherwise>
+          </choice>
+        </when>
+        <otherwise>
+          <set-payload doc:name="Unknown tool" value="#[{ error: 'Unknown tool: ' ++ vars.currentCall.function.name }]"></set-payload>
+        </otherwise>
+      </choice>
+      <error-handler>
+        <on-error-continue doc:name="Tool failed: return error as result" enableNotifications="true" logException="true">
+          <set-payload value="#[{ error: 'Tool failed: ' ++ (error.description default 'unknown') }]"></set-payload>
+        </on-error-continue>
+      </error-handler>
+    </try>
+  </sub-flow>
+
+</mule>
